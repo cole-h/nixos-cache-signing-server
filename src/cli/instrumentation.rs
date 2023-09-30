@@ -1,13 +1,13 @@
+use std::error::Error;
+use std::io::IsTerminal;
+
 use color_eyre::eyre::WrapErr;
-use std::{error::Error, io::IsTerminal};
 use tracing::Subscriber;
-use tracing_subscriber::{
-    filter::Directive,
-    layer::{Layer, SubscriberExt},
-    registry::LookupSpan,
-    util::SubscriberInitExt,
-    EnvFilter,
-};
+use tracing_subscriber::filter::Directive;
+use tracing_subscriber::layer::{Layer, SubscriberExt};
+use tracing_subscriber::registry::LookupSpan;
+use tracing_subscriber::util::SubscriberInitExt;
+use tracing_subscriber::EnvFilter;
 
 use super::logger::Logger;
 
@@ -18,7 +18,6 @@ pub struct Instrumentation {
         short = 'v',
         long, action = clap::ArgAction::Count,
         global = true,
-        default_value_t = 2, // FIXME: default to trace logs for dev
     )]
     pub verbose: u8,
     /// Which logger to use
@@ -74,7 +73,7 @@ impl Instrumentation {
                         _ => return Err(e).wrap_err_with(|| "parsing RUST_LOG directives"),
                     }
                 }
-                // If the `--log-directive` is specified, don't set a default
+                // If the `--log-directives` is specified, don't set a default
                 if self.log_directives.is_empty() {
                     EnvFilter::try_new(&format!(
                         "{}={}",

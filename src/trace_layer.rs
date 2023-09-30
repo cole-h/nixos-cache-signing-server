@@ -1,6 +1,9 @@
-use axum::{body::BoxBody, extract::ConnectInfo, response::Response};
+use axum::body::BoxBody;
+use axum::extract::ConnectInfo;
+use axum::response::Response;
 use hyper::{Body, Request};
-use std::{net::SocketAddr, time::Duration};
+use std::net::SocketAddr;
+use std::time::Duration;
 use tracing::Span;
 
 pub(crate) fn trace_layer_make_span_with(request: &Request<Body>) -> Span {

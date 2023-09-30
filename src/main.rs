@@ -2,26 +2,26 @@ mod cli;
 mod error;
 mod trace_layer;
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 use std::io::IsTerminal;
 use std::net::SocketAddr;
 use std::os::unix::prelude::OsStrExt;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::Stdio;
 
 use axum::response::IntoResponse;
 use axum::routing::{get, post};
-use axum::{Json, Router};
+use axum::Router;
 use base64::engine::general_purpose;
 use base64::Engine as _;
 use clap::Parser;
-use dryoc::constants::CRYPTO_SIGN_ED25519_SECRETKEYBYTES;
-use ed25519_dalek::Digest;
-use ed25519_dalek::{Sha512, SigningKey, SECRET_KEY_LENGTH};
+use dryoc::classic::crypto_sign_ed25519::Signature;
+use dryoc::constants::{CRYPTO_SIGN_ED25519_BYTES, CRYPTO_SIGN_ED25519_SECRETKEYBYTES};
 use tokio::io::AsyncWriteExt;
 use tokio::process::Command;
 use tower_http::trace::TraceLayer;
 
+use crate::error::AppError;
 use crate::error::Result;
 
 /*
@@ -71,16 +71,12 @@ async fn main() -> Result<()> {
 
     let app = Router::new()
         .route("/sign", post(sign))
-        .route("/sign-nar", post(sign_realisation))
+        .route("/sign-store-path", post(sign_store_path))
+        // FIXME: return this from the app's state
         .route(
             "/publickey",
             get(|| async { "test-1:rF0EjRCykUUAT5VLmYw9JiVQKb9otHAVhobICIDOefY=" }),
         )
-        // TODO: maybe make this a nix cache "wrapper" -- maybe even use https://github.com/lheckemann/nixstore-rs :eyes:
-        // .route(
-        //     "/store/nix-cache-info",
-        //     get(|| async { "StoreDir: /nix/store" }),
-        // )
         .fallback(not_found)
         .layer(trace_layer);
 
@@ -96,17 +92,15 @@ async fn not_found() -> impl IntoResponse {
     (hyper::StatusCode::NOT_FOUND, "Not Found").into_response()
 }
 
-// TODO: what's the workflow? `nix copy --to this_box` and then send the storepath to us?
-// or maybe upload the nar itself and somehow register that to the store?
-async fn sign(
+// FIXME: reimplement without calling Nix (look at `sign_fingerprint`)
+async fn sign_store_path(
     // TODO
     store_path: String,
 ) -> Result<impl IntoResponse> {
-    // TODO: content type shenanigans: https://github.com/tokio-rs/axum/blob/main/examples/parse-body-based-on-content-type/src/main.rs
     let store_path = PathBuf::from(store_path);
 
     if !store_path.exists() {
-        return Err(color_eyre::eyre::eyre!("doesn't exist").into());
+        return Err(AppError::MissingStorePath(store_path).into());
     }
 
     let secret_key_path = "./secret-key"; // FIXME: PathBuf
@@ -179,125 +173,107 @@ async fn sign(
         .next()
         .expect("Should have only had one new signature");
 
-    // if cfg!(debug_assertions) {
-    //     tracing::debug!("removing test path from store and re-adding it");
-    //     Command::new("nix-store")
-    //         .arg("--delete")
-    //         .arg(&store_path)
-    //         .stdout(Stdio::null())
-    //         .stderr(Stdio::null())
-    //         .status()
-    //         .await?;
-    //     Command::new("nix-store")
-    //         .arg("--realise")
-    //         .arg(&store_path)
-    //         .stdout(Stdio::null())
-    //         .stderr(Stdio::null())
-    //         .status()
-    //         .await?;
-    // }
-
-    // FIXME: send back the signed nar now
     Ok(new_signature.to_owned())
 }
 
-fn valid_path_info_fingerprint(
-    store_path: String,
-    base32_nar_hash: String,
-    nar_size: u64,
-    references: Vec<String>,
-) -> String {
-    let nar_size_str = nar_size.to_string();
-    let references_str = references.join(",");
-
-    let fingerprint = [
-        "1;",
-        store_path.as_ref(),
-        ";",
-        base32_nar_hash.as_ref(),
-        ";",
-        nar_size_str.as_ref(),
-        ";",
-        references_str.as_ref(),
-    ];
-
-    dbg!(fingerprint.into_iter().collect())
-}
-
-/*
-{
-  "dependentRealisations": {
-    "sha256:ba7816bf8f01cfea414140de5dae2223b00361a496177a9cf410ff61f20015ad!dev": "7h7qgvs4kgzsn8a6rb273saxyqh4jxlz-konsole-18.12.3-dev",
-    "sha256:ba7816bf8f01cfea414140de5dae2223b00361a696177a9cf410ff61f20015ad!bin": "7h7qgvs4kgzsn8a6rb273saxyqh4jxlz-konsole-18.12.3-bin"
-  },
-  "id": "sha256:ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad!out",
-  "outPath": "7h7qgvs4kgzsn8a6rb273saxyqh4jxlz-konsole-18.12.3",
-  "signatures": [
-    "hello",
-    "test1234"
-  ]
-}
-*/
-#[derive(Debug, Clone, serde_derive::Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct Realisation {
-    dependent_realisations: HashMap<String, String>,
-    id: String,
-    out_path: String,
-    signatures: Vec<String>,
-}
-
-#[derive(Debug, Clone, serde_derive::Deserialize, serde_derive::Serialize)]
-#[serde(rename_all = "camelCase")]
-struct RealisationFingerprint {
-    dependent_realisations: HashMap<String, String>,
-    id: String,
-    out_path: String,
-}
-
-impl Realisation {
-    fn fingerprint(&self) -> RealisationFingerprint {
-        RealisationFingerprint {
-            dependent_realisations: self.dependent_realisations.clone(),
-            id: self.id.clone(),
-            out_path: self.out_path.clone(),
-        }
-    }
-}
-
-// test-1:TS12zri2hld72xAwjPUyL0MGqcmbWtHuAFFoRCXu6PwFVd0Awqe4+wgENU7XbWm/itTWumccNX+c7DVFZqKVCA==
-async fn sign_realisation(// TODO
-    // Json(realisation): Json<Realisation>,
-) -> Result<impl IntoResponse> {
-    let secret_key_path = "./secret-key"; // FIXME: PathBuf
+async fn sign(fingerprint: hyper::body::Bytes) -> Result<impl IntoResponse> {
+    let secret_key_path = Path::new("./secret-key"); // FIXME: don't hardcode
     let encoded_secret_key = tokio::fs::read_to_string(secret_key_path).await?;
 
-    let Some((key_name, secret_bytes)) = encoded_secret_key.split_once(':') else {
-        todo!("???");
+    sign_fingerprint(&encoded_secret_key, fingerprint).await
+}
+
+// https://github.com/NixOS/nix/blob/ea2f74cbe178d31748d63037e238e3a4a8e02cf3/src/libstore/crypto.cc#L42-L49
+async fn sign_fingerprint(
+    secret_key_file_contents: &str,
+    fingerprint: hyper::body::Bytes,
+) -> Result<String, error::Report> {
+    let Some((key_name, secret_bytes)) = secret_key_file_contents.split_once(':') else {
+        return Err(AppError::MalformedSecretKey.into());
     };
 
     let secret_key_bytes = general_purpose::STANDARD.decode(secret_bytes)?;
     let secret_key: [u8; CRYPTO_SIGN_ED25519_SECRETKEYBYTES] = secret_key_bytes
-        .clone()
         .try_into()
-        .map_err(|_| color_eyre::eyre::eyre!("secret key wasn't {SECRET_KEY_LENGTH} bytes"))?;
+        .map_err(|_| AppError::MalformedSecretKey)?;
 
-    let fingerprint = valid_path_info_fingerprint(
-        String::from("/nix/store/mdi7lvrn2mx7rfzv3fdq3v5yw8swiks6-hello-2.12.1"),
-        String::from("sha256:0nhc4jn0g0njfs3ipfcq8jg68f35sm8k67s6pcv8fjm17avcyymi"), // MUST be a Nix base32 hash with the type prefix
-        226552,
-        vec![
-            String::from("/nix/store/aw2fw9ag10wr9pf0qk4nk5sxi0q0bn56-glibc-2.37-8"),
-            String::from("/nix/store/mdi7lvrn2mx7rfzv3fdq3v5yw8swiks6-hello-2.12.1"),
-        ],
-    );
-    let mut signature = [0u8; 64];
+    let mut signature_bytes: Signature = [0u8; CRYPTO_SIGN_ED25519_BYTES];
+
     dryoc::classic::crypto_sign::crypto_sign_detached(
-        &mut signature,
-        &fingerprint.as_bytes(),
+        &mut signature_bytes,
+        &fingerprint,
         &secret_key,
     )?;
-    let signature_base64 = general_purpose::STANDARD.encode(signature);
+
+    let signature_base64 = general_purpose::STANDARD.encode(signature_bytes);
 
     Ok(format!("{key_name}:{signature_base64}"))
+}
+
+#[cfg(test)]
+mod test {
+    use crate::sign_fingerprint;
+
+    // https://github.com/NixOS/nix/blob/ea2f74cbe178d31748d63037e238e3a4a8e02cf3/src/libstore/path-info.cc#L8-L18
+    fn valid_path_info_fingerprint(
+        store_path: String,
+        base32_nar_hash: String,
+        nar_size: u64,
+        references: Vec<String>,
+    ) -> String {
+        let nar_size_str = nar_size.to_string();
+        let references_str = references.join(",");
+
+        let fingerprint = [
+            "1;",
+            store_path.as_ref(),
+            ";",
+            base32_nar_hash.as_ref(),
+            ";",
+            nar_size_str.as_ref(),
+            ";",
+            references_str.as_ref(),
+        ];
+
+        fingerprint.into_iter().collect()
+    }
+
+    #[test]
+    fn test_fingerprint_generation() {
+        let fingerprint = valid_path_info_fingerprint(
+            String::from("/nix/store/mdi7lvrn2mx7rfzv3fdq3v5yw8swiks6-hello-2.12.1"),
+            String::from("sha256:0nhc4jn0g0njfs3ipfcq8jg68f35sm8k67s6pcv8fjm17avcyymi"), // MUST be a Nix base32 hash with the type prefix
+            226552,
+            vec![
+                String::from("/nix/store/aw2fw9ag10wr9pf0qk4nk5sxi0q0bn56-glibc-2.37-8"),
+                String::from("/nix/store/mdi7lvrn2mx7rfzv3fdq3v5yw8swiks6-hello-2.12.1"),
+            ],
+        );
+
+        assert_eq!(
+            fingerprint,
+            "1;/nix/store/mdi7lvrn2mx7rfzv3fdq3v5yw8swiks6-hello-2.12.1;sha256:0nhc4jn0g0njfs3ipfcq8jg68f35sm8k67s6pcv8fjm17avcyymi;226552;/nix/store/aw2fw9ag10wr9pf0qk4nk5sxi0q0bn56-glibc-2.37-8,/nix/store/mdi7lvrn2mx7rfzv3fdq3v5yw8swiks6-hello-2.12.1"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_fingerprint_signing() {
+        let secret_key_file_contents = include_str!("../secret-key");
+        let fingerprint = valid_path_info_fingerprint(
+            String::from("/nix/store/mdi7lvrn2mx7rfzv3fdq3v5yw8swiks6-hello-2.12.1"),
+            String::from("sha256:0nhc4jn0g0njfs3ipfcq8jg68f35sm8k67s6pcv8fjm17avcyymi"), // MUST be a Nix base32 hash with the type prefix
+            226552,
+            vec![
+                String::from("/nix/store/aw2fw9ag10wr9pf0qk4nk5sxi0q0bn56-glibc-2.37-8"),
+                String::from("/nix/store/mdi7lvrn2mx7rfzv3fdq3v5yw8swiks6-hello-2.12.1"),
+            ],
+        );
+
+        let expected_signature = "test-1:TS12zri2hld72xAwjPUyL0MGqcmbWtHuAFFoRCXu6PwFVd0Awqe4+wgENU7XbWm/itTWumccNX+c7DVFZqKVCA==";
+        let signature = sign_fingerprint(secret_key_file_contents, fingerprint.into())
+            .await
+            .expect("should have gotten a fingerprint");
+
+        assert_eq!(signature, expected_signature);
+    }
 }
