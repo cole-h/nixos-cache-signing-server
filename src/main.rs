@@ -2,7 +2,7 @@ mod cli;
 mod error;
 mod trace_layer;
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::io::IsTerminal;
 use std::net::SocketAddr;
 use std::os::unix::prelude::OsStrExt;
@@ -10,9 +10,14 @@ use std::path::PathBuf;
 use std::process::Stdio;
 
 use axum::response::IntoResponse;
-use axum::routing::post;
-use axum::Router;
+use axum::routing::{get, post};
+use axum::{Json, Router};
+use base64::engine::general_purpose;
+use base64::Engine as _;
 use clap::Parser;
+use dryoc::constants::CRYPTO_SIGN_ED25519_SECRETKEYBYTES;
+use ed25519_dalek::Digest;
+use ed25519_dalek::{Sha512, SigningKey, SECRET_KEY_LENGTH};
 use tokio::io::AsyncWriteExt;
 use tokio::process::Command;
 use tower_http::trace::TraceLayer;
@@ -44,6 +49,8 @@ struct NixPathInfo {
 }
 
 #[tokio::main]
+// FIXME: add axum state that includes the public and private keys?
+// (at the very least, keep the public key in memory, since that's not very important)
 async fn main() -> Result<()> {
     color_eyre::config::HookBuilder::default()
         .theme(if !std::io::stderr().is_terminal() {
@@ -64,7 +71,11 @@ async fn main() -> Result<()> {
 
     let app = Router::new()
         .route("/sign", post(sign))
-        .route("/verify", post(verify))
+        .route("/sign-nar", post(sign_realisation))
+        .route(
+            "/publickey",
+            get(|| async { "test-1:rF0EjRCykUUAT5VLmYw9JiVQKb9otHAVhobICIDOefY=" }),
+        )
         // TODO: maybe make this a nix cache "wrapper" -- maybe even use https://github.com/lheckemann/nixstore-rs :eyes:
         // .route(
         //     "/store/nix-cache-info",
@@ -91,13 +102,14 @@ async fn sign(
     // TODO
     store_path: String,
 ) -> Result<impl IntoResponse> {
+    // TODO: content type shenanigans: https://github.com/tokio-rs/axum/blob/main/examples/parse-body-based-on-content-type/src/main.rs
     let store_path = PathBuf::from(store_path);
 
     if !store_path.exists() {
         return Err(color_eyre::eyre::eyre!("doesn't exist").into());
     }
 
-    let private_key_path = "./secret-key"; // FIXME: PathBuf
+    let secret_key_path = "./secret-key"; // FIXME: PathBuf
 
     tracing::debug!(
         "extracting original signatures from store path '{}'",
@@ -120,14 +132,14 @@ async fn sign(
     tracing::debug!(
         "signing '{}' with key file '{}'",
         store_path.display(),
-        private_key_path
+        secret_key_path
     );
     let mut child = Command::new("nix")
         .args(["--extra-experimental-features", "nix-command"])
         .arg("store")
         .arg("sign")
         .arg("--stdin")
-        .args(["--key-file", private_key_path])
+        .args(["--key-file", secret_key_path])
         .arg(&store_path)
         .stdin(Stdio::piped())
         .spawn()?;
@@ -167,32 +179,125 @@ async fn sign(
         .next()
         .expect("Should have only had one new signature");
 
-    if cfg!(debug_assertions) {
-        tracing::debug!("removing test path from store and re-adding it");
-        Command::new("nix-store")
-            .arg("--delete")
-            .arg(&store_path)
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .status()
-            .await?;
-        Command::new("nix-store")
-            .arg("--realise")
-            .arg(&store_path)
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .status()
-            .await?;
-    }
+    // if cfg!(debug_assertions) {
+    //     tracing::debug!("removing test path from store and re-adding it");
+    //     Command::new("nix-store")
+    //         .arg("--delete")
+    //         .arg(&store_path)
+    //         .stdout(Stdio::null())
+    //         .stderr(Stdio::null())
+    //         .status()
+    //         .await?;
+    //     Command::new("nix-store")
+    //         .arg("--realise")
+    //         .arg(&store_path)
+    //         .stdout(Stdio::null())
+    //         .stderr(Stdio::null())
+    //         .status()
+    //         .await?;
+    // }
 
     // FIXME: send back the signed nar now
     Ok(new_signature.to_owned())
 }
 
-async fn verify(
-    // TODO
-    _: (),
+fn valid_path_info_fingerprint(
+    store_path: String,
+    base32_nar_hash: String,
+    nar_size: u64,
+    references: Vec<String>,
+) -> String {
+    let nar_size_str = nar_size.to_string();
+    let references_str = references.join(",");
+
+    let fingerprint = [
+        "1;",
+        store_path.as_ref(),
+        ";",
+        base32_nar_hash.as_ref(),
+        ";",
+        nar_size_str.as_ref(),
+        ";",
+        references_str.as_ref(),
+    ];
+
+    dbg!(fingerprint.into_iter().collect())
+}
+
+/*
+{
+  "dependentRealisations": {
+    "sha256:ba7816bf8f01cfea414140de5dae2223b00361a496177a9cf410ff61f20015ad!dev": "7h7qgvs4kgzsn8a6rb273saxyqh4jxlz-konsole-18.12.3-dev",
+    "sha256:ba7816bf8f01cfea414140de5dae2223b00361a696177a9cf410ff61f20015ad!bin": "7h7qgvs4kgzsn8a6rb273saxyqh4jxlz-konsole-18.12.3-bin"
+  },
+  "id": "sha256:ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad!out",
+  "outPath": "7h7qgvs4kgzsn8a6rb273saxyqh4jxlz-konsole-18.12.3",
+  "signatures": [
+    "hello",
+    "test1234"
+  ]
+}
+*/
+#[derive(Debug, Clone, serde_derive::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct Realisation {
+    dependent_realisations: HashMap<String, String>,
+    id: String,
+    out_path: String,
+    signatures: Vec<String>,
+}
+
+#[derive(Debug, Clone, serde_derive::Deserialize, serde_derive::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct RealisationFingerprint {
+    dependent_realisations: HashMap<String, String>,
+    id: String,
+    out_path: String,
+}
+
+impl Realisation {
+    fn fingerprint(&self) -> RealisationFingerprint {
+        RealisationFingerprint {
+            dependent_realisations: self.dependent_realisations.clone(),
+            id: self.id.clone(),
+            out_path: self.out_path.clone(),
+        }
+    }
+}
+
+// test-1:TS12zri2hld72xAwjPUyL0MGqcmbWtHuAFFoRCXu6PwFVd0Awqe4+wgENU7XbWm/itTWumccNX+c7DVFZqKVCA==
+async fn sign_realisation(// TODO
+    // Json(realisation): Json<Realisation>,
 ) -> Result<impl IntoResponse> {
-    // nix store verify --trusted-public-keys [the pubkey] [the storepath]?
-    Ok("hello world, from /verify")
+    let secret_key_path = "./secret-key"; // FIXME: PathBuf
+    let encoded_secret_key = tokio::fs::read_to_string(secret_key_path).await?;
+
+    let Some((key_name, secret_bytes)) = encoded_secret_key.split_once(':') else {
+        todo!("???");
+    };
+
+    let secret_key_bytes = general_purpose::STANDARD.decode(secret_bytes)?;
+    let secret_key: [u8; CRYPTO_SIGN_ED25519_SECRETKEYBYTES] = secret_key_bytes
+        .clone()
+        .try_into()
+        .map_err(|_| color_eyre::eyre::eyre!("secret key wasn't {SECRET_KEY_LENGTH} bytes"))?;
+
+    let fingerprint = valid_path_info_fingerprint(
+        String::from("/nix/store/mdi7lvrn2mx7rfzv3fdq3v5yw8swiks6-hello-2.12.1"),
+        String::from("sha256:0nhc4jn0g0njfs3ipfcq8jg68f35sm8k67s6pcv8fjm17avcyymi"), // MUST be a Nix base32 hash with the type prefix
+        226552,
+        vec![
+            String::from("/nix/store/aw2fw9ag10wr9pf0qk4nk5sxi0q0bn56-glibc-2.37-8"),
+            String::from("/nix/store/mdi7lvrn2mx7rfzv3fdq3v5yw8swiks6-hello-2.12.1"),
+        ],
+    );
+    let mut signature = [0u8; 64];
+    dryoc::classic::crypto_sign::crypto_sign_detached(
+        &mut signature,
+        &fingerprint.as_bytes(),
+        &secret_key,
+    )?;
+    let signature_base64 = general_purpose::STANDARD.encode(signature);
+
+    Ok(format!("{key_name}:{signature_base64}"))
 }
