@@ -78,8 +78,6 @@ fn secret_key_from_contents(
 }
 
 #[tokio::main]
-// FIXME: add axum state that includes the public and private keys?
-// (at the very least, keep the public key in memory, since that's not very important)
 async fn main() -> Result<()> {
     color_eyre::config::HookBuilder::default()
         .theme(if !std::io::stderr().is_terminal() {
@@ -104,7 +102,6 @@ async fn main() -> Result<()> {
     let app = Router::new()
         .route("/sign", post(sign))
         .route("/sign-store-path", post(sign_store_path))
-        // FIXME: return this from the app's state
         .route("/publickey", get(public_key))
         .with_state(ctx.clone())
         .fallback(not_found)
