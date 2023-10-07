@@ -48,6 +48,7 @@ impl AppContextInner {
     }
 }
 
+#[tracing::instrument(skip_all)]
 fn secret_key_to_public_key(secret_key_file_contents: &str) -> Result<String> {
     let (key_name, secret_key) = secret_key_from_contents(secret_key_file_contents)?;
 
@@ -62,6 +63,7 @@ fn secret_key_to_public_key(secret_key_file_contents: &str) -> Result<String> {
     Ok(public_key)
 }
 
+#[tracing::instrument(skip_all)]
 fn secret_key_from_contents(
     secret_key_file_contents: &str,
 ) -> Result<(String, [u8; CRYPTO_SIGN_ED25519_SECRETKEYBYTES]), error::Report> {

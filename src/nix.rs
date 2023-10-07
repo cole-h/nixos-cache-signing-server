@@ -80,6 +80,7 @@ impl SRIHash {
 
     // Adapted from:
     // https://github.com/NixOS/nix/blob/78e886bc5fd9e4d85f8503799540c0b71bb270be/src/libutil/hash.cc#L88-L108
+    #[tracing::instrument(skip_all)]
     pub fn to_nix_base32(&self) -> Result<NixBase32> {
         let base64_digest = &self.0.digest;
         let digest_bytes = STANDARD.decode(base64_digest)?;
@@ -114,6 +115,7 @@ impl SRIHash {
 impl PathInfo {
     // Adapted from:
     // https://github.com/NixOS/nix/blob/ea2f74cbe178d31748d63037e238e3a4a8e02cf3/src/libstore/path-info.cc#L8-L18
+    #[tracing::instrument(skip_all)]
     pub fn fingerprint(&self) -> Result<String> {
         let nar_size_string = self.nar_size.to_string();
         let references_string = self.references.join(",");
