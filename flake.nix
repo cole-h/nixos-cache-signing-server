@@ -22,6 +22,15 @@
     in
     {
 
+      overlays.default = final: prev: {
+        nixos-cache-signing-server = inputs.self.packages.${final.stdenv.system}.default;
+      };
+
+      nixosModules = rec {
+        default = server;
+        server = import ./nixos-module.nix;
+      };
+
       packages = forAllSystems ({ system, pkgs, ... }: {
         default = pkgs.rustPlatform.buildRustPackage {
           pname = "nixos-cache-signing-server";
