@@ -11,11 +11,16 @@
 
       version = "${builtins.substring 0 8 lastModifiedDate}-${self.shortRev or "dirty"}";
 
-      forSystems = s: f: inputs.nixpkgs.lib.genAttrs s (system: f rec {
+      forSystem = system: f: f rec {
         inherit system;
-        pkgs = import inputs.nixpkgs { inherit system; };
         lib = pkgs.lib;
-      });
+        pkgs = import inputs.nixpkgs {
+          inherit system;
+          overlays = [ self.overlays.default ];
+        };
+      };
+
+      forSystems = s: f: inputs.nixpkgs.lib.genAttrs s (sys: forSystem sys f);
 
       forAllSystems = forSystems [ "x86_64-linux" "aarch64-linux" ];
 
@@ -50,6 +55,10 @@
             cargo
           ];
         };
+      });
+
+      checks = forAllSystems ({ system, pkgs, lib, ... }: {
+        nixos = import ./nixos-test.nix { inherit system pkgs lib; };
       });
 
     };

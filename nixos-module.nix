@@ -92,7 +92,7 @@ in
       after = [ "network-online.target" ];
       path = [ config.nix.package ];
       startLimitBurst = 5;
-      startLimitIntervalSec = 20;
+      startLimitIntervalSec = 10;
 
       serviceConfig = {
         Restart = "always";
