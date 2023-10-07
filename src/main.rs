@@ -17,6 +17,7 @@ use axum::Router;
 use base64::engine::general_purpose::STANDARD;
 use base64::Engine as _;
 use clap::Parser;
+use color_eyre::eyre::WrapErr;
 use dryoc::classic::crypto_sign_ed25519::Signature;
 use dryoc::constants::{
     CRYPTO_SIGN_ED25519_BYTES, CRYPTO_SIGN_ED25519_PUBLICKEYBYTES,
@@ -38,7 +39,9 @@ struct AppContextInner {
 
 impl AppContextInner {
     async fn new(secret_key_path: &Path) -> Result<Self> {
-        let secret_key_path_contents = tokio::fs::read_to_string(&secret_key_path).await?;
+        let secret_key_path_contents = tokio::fs::read_to_string(&secret_key_path)
+            .await
+            .wrap_err_with(|| format!("Failed to read {}", secret_key_path.display()))?;
         let public_key = secret_key_to_public_key(&secret_key_path_contents)?;
 
         Ok(Self {
@@ -155,7 +158,10 @@ async fn sign_store_path(
         .first()
         .ok_or_else(|| color_eyre::eyre::eyre!("Should have been a first path info"))?;
 
-    let encoded_secret_key = tokio::fs::read_to_string(&state.secret_key_path).await?;
+    let encoded_secret_key = tokio::fs::read_to_string(&state.secret_key_path)
+        .await
+        .wrap_err_with(|| format!("Failed to read {}", state.secret_key_path.display()))?;
+
     let fingerprint = nix_path_info.fingerprint()?;
 
     sign_fingerprint(&encoded_secret_key, fingerprint.into()).await
@@ -166,7 +172,9 @@ async fn sign(
     State(state): State<AppContext>,
     fingerprint: hyper::body::Bytes,
 ) -> Result<impl IntoResponse> {
-    let encoded_secret_key = tokio::fs::read_to_string(&state.secret_key_path).await?;
+    let encoded_secret_key = tokio::fs::read_to_string(&state.secret_key_path)
+        .await
+        .wrap_err_with(|| format!("Failed to read {}", state.secret_key_path.display()))?;
 
     sign_fingerprint(&encoded_secret_key, fingerprint).await
 }
