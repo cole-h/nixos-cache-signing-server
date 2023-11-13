@@ -38,10 +38,16 @@ struct AppContextInner {
 }
 
 impl AppContextInner {
-    async fn new(secret_key_path: &Path) -> Result<Self> {
+    async fn get_secret_contents(secret_key_path: &Path) -> Result<String> {
         let secret_key_path_contents = tokio::fs::read_to_string(&secret_key_path)
             .await
             .wrap_err_with(|| format!("Failed to read {}", secret_key_path.display()))?;
+
+        Ok(secret_key_path_contents.trim().to_owned())
+    }
+
+    async fn new(secret_key_path: &Path) -> Result<Self> {
+        let secret_key_path_contents = Self::get_secret_contents(secret_key_path).await?;
         let public_key = secret_key_to_public_key(&secret_key_path_contents)?;
 
         Ok(Self {
@@ -158,9 +164,7 @@ async fn sign_store_path(
         .first()
         .ok_or_else(|| color_eyre::eyre::eyre!("Should have been a first path info"))?;
 
-    let encoded_secret_key = tokio::fs::read_to_string(&state.secret_key_path)
-        .await
-        .wrap_err_with(|| format!("Failed to read {}", state.secret_key_path.display()))?;
+    let encoded_secret_key = AppContextInner::get_secret_contents(&state.secret_key_path).await?;
 
     let fingerprint = nix_path_info.fingerprint()?;
 
@@ -172,9 +176,7 @@ async fn sign(
     State(state): State<AppContext>,
     fingerprint: hyper::body::Bytes,
 ) -> Result<impl IntoResponse> {
-    let encoded_secret_key = tokio::fs::read_to_string(&state.secret_key_path)
-        .await
-        .wrap_err_with(|| format!("Failed to read {}", state.secret_key_path.display()))?;
+    let encoded_secret_key = AppContextInner::get_secret_contents(&state.secret_key_path).await?;
 
     sign_fingerprint(&encoded_secret_key, fingerprint).await
 }
