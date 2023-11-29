@@ -53,9 +53,10 @@ fn test_fingerprint_generation() {
 async fn test_fingerprint_signing() {
     let path_info = test_path_info();
     let fingerprint = path_info.fingerprint().unwrap();
+    let fingerprint = bytes::Bytes::from(fingerprint);
 
     let expected_signature = "test-1:TS12zri2hld72xAwjPUyL0MGqcmbWtHuAFFoRCXu6PwFVd0Awqe4+wgENU7XbWm/itTWumccNX+c7DVFZqKVCA==";
-    let signature = super::sign_fingerprint(SECRET_KEY_FILE_CONTENTS, fingerprint.into())
+    let signature = super::sign_fingerprint_with_secret_key(&fingerprint, SECRET_KEY_FILE_CONTENTS)
         .await
         .expect("should have gotten a fingerprint");
 
