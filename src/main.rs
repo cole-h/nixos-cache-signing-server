@@ -110,11 +110,13 @@ async fn main() -> Result<()> {
         .on_request(trace_layer::trace_layer_on_request)
         .on_response(trace_layer::trace_layer_on_response);
 
-    let app = Router::new()
+    let v1 = Router::new()
         .route("/sign", post(sign))
         .route("/sign-store-path", post(sign_store_path))
         .route("/publickey", get(public_key))
-        .with_state(ctx.clone())
+        .with_state(ctx.clone());
+    let app = Router::new()
+        .nest("/_api/v1", v1)
         .fallback(not_found)
         .layer(trace_layer);
 
