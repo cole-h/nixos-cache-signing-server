@@ -76,7 +76,7 @@ impl ToString for NixBase32 {
 impl SRIHash {
     // https://github.com/NixOS/nix/blob/78e886bc5fd9e4d85f8503799540c0b71bb270be/src/libutil/hash.cc#L85
     // ommitted: E O U T
-    pub const BASE32_CHARS: &[u8] = b"0123456789abcdfghijklmnpqrsvwxyz";
+    pub const BASE32_CHARS: &'static [u8] = b"0123456789abcdfghijklmnpqrsvwxyz";
 
     // Adapted from:
     // https://github.com/NixOS/nix/blob/78e886bc5fd9e4d85f8503799540c0b71bb270be/src/libutil/hash.cc#L88-L108
