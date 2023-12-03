@@ -75,7 +75,7 @@ impl Instrumentation {
                 }
                 // If the `--log-directives` is specified, don't set a default
                 if self.log_directives.is_empty() {
-                    EnvFilter::try_new(&format!(
+                    EnvFilter::try_new(format!(
                         "{}={}",
                         env!("CARGO_PKG_NAME").replace('-', "_"),
                         self.log_level()

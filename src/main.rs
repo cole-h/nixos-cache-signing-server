@@ -72,7 +72,7 @@ fn secret_key_to_public_key(secret_key_file_contents: &str) -> Result<NixPublicK
         [u8; CRYPTO_SIGN_ED25519_SECRETKEYBYTES],
     > = SigningKeyPair::from_secret_key(secret_key);
 
-    let public_key_base64 = STANDARD.encode(&signing_pair.public_key);
+    let public_key_base64 = STANDARD.encode(signing_pair.public_key);
 
     Ok(NixPublicKey {
         name: key_name,
@@ -220,9 +220,9 @@ async fn sign_fingerprint_with_keys(
     let mut signatures = HashSet::new();
 
     for secret_key_path in keypairs.values() {
-        let encoded_secret_key = AppContextInner::get_secret_contents(&secret_key_path).await?;
+        let encoded_secret_key = AppContextInner::get_secret_contents(secret_key_path).await?;
         let signature =
-            sign_fingerprint_with_secret_key(&fingerprint_bytes, &encoded_secret_key).await?;
+            sign_fingerprint_with_secret_key(fingerprint_bytes, &encoded_secret_key).await?;
         signatures.insert(signature);
     }
 
@@ -243,7 +243,7 @@ async fn sign_fingerprint_with_secret_key(
 
     dryoc::classic::crypto_sign::crypto_sign_detached(
         &mut signature_bytes,
-        &fingerprint,
+        fingerprint,
         &secret_key,
     )?;
 
