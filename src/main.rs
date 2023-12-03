@@ -5,17 +5,19 @@ mod nix;
 mod test;
 mod trace_layer;
 
+use std::collections::{HashMap, HashSet};
 use std::io::IsTerminal;
 use std::net::SocketAddr;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use axum::extract::State;
 use axum::response::IntoResponse;
 use axum::routing::{get, post};
-use axum::Router;
+use axum::{Json, Router};
 use base64::engine::general_purpose::STANDARD;
 use base64::Engine as _;
+use bytes::Bytes;
 use clap::Parser;
 use color_eyre::eyre::WrapErr;
 use dryoc::classic::crypto_sign_ed25519::Signature;
@@ -24,6 +26,8 @@ use dryoc::constants::{
     CRYPTO_SIGN_ED25519_SECRETKEYBYTES,
 };
 use dryoc::sign::SigningKeyPair;
+use nix::{NixKeypairMap, NixPrivateKeyPath, NixPublicKey};
+use serde_derive::Serialize;
 use tokio::process::Command;
 use tower_http::trace::TraceLayer;
 
@@ -33,32 +37,34 @@ use crate::error::Result;
 type AppContext = Arc<AppContextInner>;
 
 struct AppContextInner {
-    secret_key_path: PathBuf,
-    public_key: String,
+    /// A mapping of public keys to private key paths.
+    keypairs: NixKeypairMap,
 }
 
 impl AppContextInner {
-    async fn get_secret_contents(secret_key_path: &Path) -> Result<String> {
-        let secret_key_path_contents = tokio::fs::read_to_string(&secret_key_path)
+    async fn get_secret_contents(secret_key_path: &NixPrivateKeyPath) -> Result<String> {
+        let secret_key_path_contents = tokio::fs::read_to_string(&secret_key_path.0)
             .await
-            .wrap_err_with(|| format!("Failed to read {}", secret_key_path.display()))?;
+            .wrap_err_with(|| format!("Failed to read {}", secret_key_path.0.display()))?;
 
         Ok(secret_key_path_contents.trim().to_owned())
     }
 
-    async fn new(secret_key_path: &Path) -> Result<Self> {
-        let secret_key_path_contents = Self::get_secret_contents(secret_key_path).await?;
-        let public_key = secret_key_to_public_key(&secret_key_path_contents)?;
+    async fn new(secret_key_paths: Vec<NixPrivateKeyPath>) -> Result<Self> {
+        let mut keypairs = HashMap::new();
 
-        Ok(Self {
-            secret_key_path: secret_key_path.to_path_buf(),
-            public_key,
-        })
+        for secret_key_path in secret_key_paths.into_iter() {
+            let secret_key_path_contents = Self::get_secret_contents(&secret_key_path).await?;
+            let public_key = secret_key_to_public_key(&secret_key_path_contents)?;
+            keypairs.insert(public_key, secret_key_path);
+        }
+
+        Ok(Self { keypairs })
     }
 }
 
 #[tracing::instrument(skip_all)]
-fn secret_key_to_public_key(secret_key_file_contents: &str) -> Result<String> {
+fn secret_key_to_public_key(secret_key_file_contents: &str) -> Result<NixPublicKey> {
     let (key_name, secret_key) = secret_key_from_contents(secret_key_file_contents)?;
 
     let signing_pair: SigningKeyPair<
@@ -66,10 +72,12 @@ fn secret_key_to_public_key(secret_key_file_contents: &str) -> Result<String> {
         [u8; CRYPTO_SIGN_ED25519_SECRETKEYBYTES],
     > = SigningKeyPair::from_secret_key(secret_key);
 
-    let public_key_base64 = STANDARD.encode(&signing_pair.public_key);
-    let public_key = format!("{key_name}:{public_key_base64}");
+    let public_key_base64 = STANDARD.encode(signing_pair.public_key);
 
-    Ok(public_key)
+    Ok(NixPublicKey {
+        name: key_name,
+        key: public_key_base64,
+    })
 }
 
 #[tracing::instrument(skip_all)]
@@ -102,7 +110,7 @@ async fn main() -> Result<()> {
     let cli = cli::Cli::parse();
     cli.instrumentation.setup()?;
 
-    let ctx = AppContextInner::new(&cli.secret_key_file).await?;
+    let ctx = AppContextInner::new(cli.secret_key_files).await?;
     let ctx = Arc::new(ctx);
 
     let trace_layer = TraceLayer::new_for_http()
@@ -110,11 +118,13 @@ async fn main() -> Result<()> {
         .on_request(trace_layer::trace_layer_on_request)
         .on_response(trace_layer::trace_layer_on_response);
 
-    let app = Router::new()
+    let v1 = Router::new()
         .route("/sign", post(sign))
         .route("/sign-store-path", post(sign_store_path))
-        .route("/publickey", get(public_key))
-        .with_state(ctx.clone())
+        .route("/publickeys", get(public_keys))
+        .with_state(ctx.clone());
+    let app = Router::new()
+        .nest("/_api/v1", v1)
         .fallback(not_found)
         .layer(trace_layer);
 
@@ -131,9 +141,24 @@ async fn not_found() -> impl IntoResponse {
     (hyper::StatusCode::NOT_FOUND, "Not Found").into_response()
 }
 
+#[derive(Serialize)]
+struct PublicKeysResponse {
+    /// A mapping of public key names to their public key
+    public_keys: HashMap<String, String>,
+}
+
 #[tracing::instrument(skip_all)]
-async fn public_key(State(state): State<AppContext>) -> impl IntoResponse {
-    state.public_key.clone()
+async fn public_keys(State(state): State<AppContext>) -> impl IntoResponse {
+    let mut public_keys = HashMap::new();
+
+    for public_key in state.keypairs.keys().cloned() {
+        // FIXME(cole-h): should the key contain the key name or not?
+        public_keys.insert(public_key.name, public_key.key);
+    }
+
+    let resp = PublicKeysResponse { public_keys };
+
+    Json(resp)
 }
 
 #[tracing::instrument(skip_all)]
@@ -164,28 +189,53 @@ async fn sign_store_path(
         .first()
         .ok_or_else(|| color_eyre::eyre::eyre!("Should have been a first path info"))?;
 
-    let encoded_secret_key = AppContextInner::get_secret_contents(&state.secret_key_path).await?;
-
     let fingerprint = nix_path_info.fingerprint()?;
+    let fingerprint_bytes = Bytes::from(fingerprint);
 
-    sign_fingerprint(&encoded_secret_key, fingerprint.into()).await
+    let json = sign_fingerprint_with_keys(&fingerprint_bytes, &state.keypairs).await?;
+
+    Ok(json)
 }
 
 #[tracing::instrument(skip_all)]
 async fn sign(
     State(state): State<AppContext>,
-    fingerprint: hyper::body::Bytes,
+    fingerprint_bytes: bytes::Bytes,
 ) -> Result<impl IntoResponse> {
-    let encoded_secret_key = AppContextInner::get_secret_contents(&state.secret_key_path).await?;
+    let json = sign_fingerprint_with_keys(&fingerprint_bytes, &state.keypairs).await?;
 
-    sign_fingerprint(&encoded_secret_key, fingerprint).await
+    Ok(json)
+}
+
+#[derive(Serialize)]
+struct SignaturesResponse {
+    signatures: HashSet<String>,
+}
+
+#[tracing::instrument(skip_all)]
+async fn sign_fingerprint_with_keys(
+    fingerprint_bytes: &bytes::Bytes,
+    keypairs: &NixKeypairMap,
+) -> Result<Json<SignaturesResponse>, error::Report> {
+    let mut signatures = HashSet::new();
+
+    for secret_key_path in keypairs.values() {
+        let encoded_secret_key = AppContextInner::get_secret_contents(secret_key_path).await?;
+        let signature =
+            sign_fingerprint_with_secret_key(fingerprint_bytes, &encoded_secret_key).await?;
+        signatures.insert(signature);
+    }
+
+    let resp = SignaturesResponse { signatures };
+
+    Ok(Json(resp))
 }
 
 // https://github.com/NixOS/nix/blob/ea2f74cbe178d31748d63037e238e3a4a8e02cf3/src/libstore/crypto.cc#L42-L49
 #[tracing::instrument(skip_all)]
-async fn sign_fingerprint(
+async fn sign_fingerprint_with_secret_key(
+    fingerprint: &bytes::Bytes,
     secret_key_file_contents: &str,
-    fingerprint: hyper::body::Bytes,
 ) -> Result<String, error::Report> {
     let (key_name, secret_key) = secret_key_from_contents(secret_key_file_contents)?;
 
@@ -193,7 +243,7 @@ async fn sign_fingerprint(
 
     dryoc::classic::crypto_sign::crypto_sign_detached(
         &mut signature_bytes,
-        &fingerprint,
+        fingerprint,
         &secret_key,
     )?;
 
