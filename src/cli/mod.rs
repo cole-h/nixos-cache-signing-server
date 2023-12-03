@@ -3,7 +3,8 @@ mod logger;
 
 use clap::Parser;
 use std::net::{IpAddr, Ipv6Addr, SocketAddr};
-use std::path::PathBuf;
+
+use crate::nix::NixPrivateKeyPath;
 
 #[derive(Debug, Parser)]
 #[clap(version)]
@@ -12,7 +13,7 @@ pub struct Cli {
     pub bind: SocketAddr,
 
     #[clap(long)]
-    pub secret_key_files: Vec<PathBuf>,
+    pub secret_key_files: Vec<NixPrivateKeyPath>,
 
     #[clap(flatten)]
     pub instrumentation: instrumentation::Instrumentation,

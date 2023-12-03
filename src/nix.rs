@@ -1,8 +1,34 @@
+use std::collections::HashMap;
+use std::path::PathBuf;
+
 use base64::engine::general_purpose::STANDARD;
 use base64::Engine as _;
 use serde::Deserialize as _;
 
 use crate::error::Result;
+
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub(crate) struct NixPublicKey {
+    pub(crate) name: String,
+    pub(crate) key: String,
+}
+
+impl std::fmt::Display for NixPublicKey {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_fmt(format_args!("{}:{}", self.name, self.key))
+    }
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct NixPrivateKeyPath(pub(crate) PathBuf);
+
+impl From<&std::ffi::OsStr> for NixPrivateKeyPath {
+    fn from(value: &std::ffi::OsStr) -> Self {
+        Self(value.into())
+    }
+}
+
+pub(crate) type NixKeypairMap = HashMap<NixPublicKey, NixPrivateKeyPath>;
 
 #[derive(Debug, Clone, serde_derive::Deserialize)]
 #[serde(rename_all = "camelCase")]

@@ -8,7 +8,7 @@ mod trace_layer;
 use std::collections::{HashMap, HashSet};
 use std::io::IsTerminal;
 use std::net::SocketAddr;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use axum::extract::State;
@@ -26,6 +26,7 @@ use dryoc::constants::{
     CRYPTO_SIGN_ED25519_SECRETKEYBYTES,
 };
 use dryoc::sign::SigningKeyPair;
+use nix::{NixKeypairMap, NixPrivateKeyPath, NixPublicKey};
 use serde_derive::Serialize;
 use tokio::process::Command;
 use tower_http::trace::TraceLayer;
@@ -35,27 +36,22 @@ use crate::error::Result;
 
 type AppContext = Arc<AppContextInner>;
 
-// FIXME(cole-h): make these proper wrapper types
-type NixPublicKey = String;
-type NixPrivateKeyPath = PathBuf;
-type KeypairMap = HashMap<NixPublicKey, NixPrivateKeyPath>;
-
 struct AppContextInner {
     /// A mapping of public keys to private key paths.
-    keypairs: KeypairMap,
+    keypairs: NixKeypairMap,
 }
 
 impl AppContextInner {
-    async fn get_secret_contents(secret_key_path: &Path) -> Result<String> {
-        let secret_key_path_contents = tokio::fs::read_to_string(&secret_key_path)
+    async fn get_secret_contents(secret_key_path: &NixPrivateKeyPath) -> Result<String> {
+        let secret_key_path_contents = tokio::fs::read_to_string(&secret_key_path.0)
             .await
-            .wrap_err_with(|| format!("Failed to read {}", secret_key_path.display()))?;
+            .wrap_err_with(|| format!("Failed to read {}", secret_key_path.0.display()))?;
 
         Ok(secret_key_path_contents.trim().to_owned())
     }
 
-    async fn new(secret_key_paths: Vec<PathBuf>) -> Result<Self> {
-        let mut keypairs: HashMap<String, PathBuf> = HashMap::new();
+    async fn new(secret_key_paths: Vec<NixPrivateKeyPath>) -> Result<Self> {
+        let mut keypairs = HashMap::new();
 
         for secret_key_path in secret_key_paths.into_iter() {
             let secret_key_path_contents = Self::get_secret_contents(&secret_key_path).await?;
@@ -68,7 +64,7 @@ impl AppContextInner {
 }
 
 #[tracing::instrument(skip_all)]
-fn secret_key_to_public_key(secret_key_file_contents: &str) -> Result<String> {
+fn secret_key_to_public_key(secret_key_file_contents: &str) -> Result<NixPublicKey> {
     let (key_name, secret_key) = secret_key_from_contents(secret_key_file_contents)?;
 
     let signing_pair: SigningKeyPair<
@@ -77,9 +73,11 @@ fn secret_key_to_public_key(secret_key_file_contents: &str) -> Result<String> {
     > = SigningKeyPair::from_secret_key(secret_key);
 
     let public_key_base64 = STANDARD.encode(&signing_pair.public_key);
-    let public_key = format!("{key_name}:{public_key_base64}");
 
-    Ok(public_key)
+    Ok(NixPublicKey {
+        name: key_name,
+        key: public_key_base64,
+    })
 }
 
 #[tracing::instrument(skip_all)]
@@ -123,7 +121,7 @@ async fn main() -> Result<()> {
     let v1 = Router::new()
         .route("/sign", post(sign))
         .route("/sign-store-path", post(sign_store_path))
-        .route("/publickey", get(public_key))
+        .route("/publickeys", get(public_keys))
         .with_state(ctx.clone());
     let app = Router::new()
         .nest("/_api/v1", v1)
@@ -145,14 +143,20 @@ async fn not_found() -> impl IntoResponse {
 
 #[derive(Serialize)]
 struct PublicKeysResponse {
-    public_keys: HashSet<String>,
+    /// A mapping of public key names to their public key
+    public_keys: HashMap<String, String>,
 }
 
 #[tracing::instrument(skip_all)]
-async fn public_key(State(state): State<AppContext>) -> impl IntoResponse {
-    let resp = PublicKeysResponse {
-        public_keys: state.keypairs.keys().cloned().collect(),
-    };
+async fn public_keys(State(state): State<AppContext>) -> impl IntoResponse {
+    let mut public_keys = HashMap::new();
+
+    for public_key in state.keypairs.keys().cloned() {
+        // FIXME(cole-h): should the key contain the key name or not?
+        public_keys.insert(public_key.name, public_key.key);
+    }
+
+    let resp = PublicKeysResponse { public_keys };
 
     Json(resp)
 }
@@ -211,7 +215,7 @@ struct SignaturesResponse {
 #[tracing::instrument(skip_all)]
 async fn sign_fingerprint_with_keys(
     fingerprint_bytes: &bytes::Bytes,
-    keypairs: &KeypairMap,
+    keypairs: &NixKeypairMap,
 ) -> Result<Json<SignaturesResponse>, error::Report> {
     let mut signatures = HashSet::new();
 

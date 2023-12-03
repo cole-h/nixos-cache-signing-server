@@ -66,5 +66,5 @@ async fn test_fingerprint_signing() {
 #[test]
 fn test_pubkey_generation() {
     let public_key = super::secret_key_to_public_key(SECRET_KEY_FILE_CONTENTS).unwrap();
-    assert_eq!(public_key, PUBLIC_KEY_FILE_CONTENTS);
+    assert_eq!(public_key.to_string(), PUBLIC_KEY_FILE_CONTENTS);
 }
